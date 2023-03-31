@@ -1,0 +1,148 @@
+# Sto je REST
+
+_REpresentational State Transfer_ je arhitekturalni nacin izgradnje distribuiranih hypermedia sustava.
+Nastao je 2000 a prvi ga je definirao Roy Fielding u svojoj dizertaciji.
+
+Danas je jedan od tri najpopularnija nacina izrade APIja:
+
+1. REST API
+2. GraphQL API
+3. GRPC
+
+REST ima svoje guidelineove i constraintove kojih smo se primorani drzati ukoliko izradujemo RESTful API.
+REST API je samim time API koji garantira da ce imati implementirane _REST constraintove_.
+
+# 6 REST Constraintova
+
+Postoje ukupno 6 pravila za implementaciju RESTful APIja:
+
+1. Uniform interface
+2. Stateless
+3. Cachable
+4. Client - Server
+5. Layered system
+6. Code on demand (optional)
+
+## Uniform interface
+
+`Mora postojati precizno definiran interfejs izmedu klijenta i servera.`
+
+Detaljnije i razumnije je razumjeti ovaj constraint kroz njegova podpravila:
+
+### identifikacija resursa
+
+Treba postojati jasan nacin za identificirat resurs od strane klijenta na servera
+Resurs je zapravo kao entitet, odnosno ako imamo endpoint /cars ocekujemo da fetchajemo ili manipuliramo sa car entitetima.
+
+### manipulacija resursa kroz reprezentaciju
+
+Resursi moraju imati uniformnu reprezentaciju i klijenti moraju moci manipulirati tim resursima putem iste reprezentacije.
+
+### self-descriptive messages
+
+Svaka reprezentacija resursa mora nositi sve informacije o tome kako treba procesirati resurs.
+
+### hypermedia as the engine of application state
+
+Klijent treba nuzno imati samo inicijalni uri resursa, pa dalje kroz komunikaciju sa serverom bi trebao biti u stanju doci do nacina kako pozvati ostale akcije.
+npr. Ako trebamo updateati/deleteati/addati novi post, treba nam samo inicijalni GET i putem hyperlinkova moramo moci kao klijent doci do ostalih akcija kao i subresursa
+
+//Bitno je naglasiti da u danasnjim APIjima su implementacije svih pravila diskutabilne, a sto su manje podredeni implementaciji standarda to su ti APIji nestabilniji i nezeljeniji od strane klijenata
+//Razlog za gornji problem: klijent mora puno toga hendlati sam kako bi se osigurao da mu API daje i vraca ocekivane akcije i odgovore na te akcije.
+
+## Stateless constraint
+
+Kada klijent salje _request_ serveru, taj request mora sadrzavati sve sto je serveru potrebno da obradi trazenu akciju.
+Server se nesmije oslanjati na nikakvo svoje interno stanje.
+Ako se treba kroz requeste pamtiti kakvo stanje koje utjece na flow requestova onda ono mora biti spremljeno iskljucivo na klijentu i poslano kroz request serveru.
+
+//npr. load balancer i 5 servera iza, kako bi load balancer trebao znati koji mu cuva state
+
+## Cachable
+
+Server mora obznaniti klijentu jel moze i koliko moze cacheirati response.
+Unatoc tome, klijent mora moci uz pomoc http headera bypass-ati kesiranje ako zeli to.
+
+## Client - Server
+
+Klijent i server se moraju dogovoriti oko "contracta" putem kojih komuniciraju, ostalo je sve nebitno, mogu radit na totalno drukcije nacine i tehnologije.
+
+## Layered system
+
+Klijent nemoze i nemora znati jel spojen na jednog servera ili na grupu servera povezanih preko load balancera (api gateway) i slicno.
+
+## Code on demand
+
+Server moze poslati kod klijentu koji klijent moze zarunnati.
+
+# Detalji iz Constraintova
+
+## Resource naming i routiranje
+
+Resurs je item/model kojeg storeamo.
+Routiranje su endpointovi koje pozivamo da bi dobili taj resurs.
+
+All movies: `/movies`
+Movie by id: `/movies/1`
+All ratings for movie: `/movies/1/ratings`
+My own ratings: `/ratings/me`
+
+Za svaki prethodno naveden request moramo dodati i akciju, npr. za fetchavanje `GET`
+
+Sa tim u jednadzbi za dohvat svih ocjena za odreden film cemo koristiti istu rutu kao i za dodati/izbrisati/izmjeniti novu ocjenu za film.
+
+```
+GET /movies/1/ratings
+POST /movies/1/ratings
+```
+
+## HTTP Verbs
+
+HTTP Verbovi su nacin na koji odabiremo koju akciju cemo primjeniti nad pozvanom rutom.
+Postoji ukupno sljedecih x verbova:
+
+- _POST_ => kreira resurs
+- _GET_ => dohvaca resurs
+- _PUT_ => kompletno mijenja resurs
+- _PATCH_ => parcijalno mijenja resurs (kompleksniji mehanizam pa se zato ne koristi koliko i put)
+- _DELETE_ => izbrisi resurs
+
+Verbsi se imaju dvije podijele, prva je na _safe_ i _unsafe_ metode.
+GET je safe jer pozivanje GET-a nece nikada imati side effect na izmjenu samog resursa kojeg dohvacamo. (jesu i OPTIONS i HEAD ali necemo o njima)
+Sve ostale metode su unsafe jer na neki nacin mijenjaju resurs.
+
+## HTTP Status kodovi
+
+Kako bi se pridrzavali REST API uputa, moramo za odredene ishode na odredene akcije resursa vratiti ispravne status kodove.
+
+### GET
+
+- single resource: (/items/1): 200, 404
+- collection resource: (/items): 200
+
+### POST
+
+- single resource: (/items/1): N/A
+- collection resource: (/items): 201 (Location header), 202 (asynchrounously)
+
+### PUT
+
+- single resource: (/items/1): 200, 204, 404
+- collection resource: (/items): 405 method not allowed
+
+### DELETE
+
+- single resource: (/items/1): 200, 404
+- collection resource: (/items): 405 (can be allowed but dangerous)
+
+## REST API Response body
+
+Uglavnom je praksa da to bude json, ali moze biti i xml
+pr.
+
+```
+{
+    "Title": "React Query predavanje",
+    "Content": "Lorem ipsum dolor..."
+}
+```

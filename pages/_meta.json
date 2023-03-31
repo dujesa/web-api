@@ -1,7 +1,7 @@
 {
-  "index": "Introduction",
-  "another": "Another Page",
-  "advanced": "Advanced (A Folder)",
+  "index": "DUMP Internship - Web API predavanja",
+  "overview": "Overview",
+  "rest": "REST API",
   "about": {
     "title": "About",
     "type": "page"
