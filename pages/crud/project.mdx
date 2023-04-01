@@ -1,0 +1,222 @@
+# O projektu
+
+Kroz ovo predavanje cemo napraviti CRUD api za osobni blog.
+Endpointovi koje cemo izraditi ce omoguciti nama izlistavanje, objavljivanje, editiranje i brisanje postova.
+A paralelno tome posjetiteljima ce omoguciti da voteaju na odreden post na nacin da mogu dati koliko god likeova zele, ali jedan po jedan like kao i ukloniti sve svoje likeove sa odredenog posta ako se predomisle.
+
+## Inicijalizacija projekata
+
+Kako bi stvorili novi api projekt pratimo sljedece korake:
+
+- napravimo solution
+- dodamo prvi projekt kojem odabiremo zeljenu verziju sdk _7.0_ i pit projekta _Web API_
+- damo ime projektu `<projekt>.Api`
+- dodajemo drugi projekt, kojem tip template odabiremo da je class lib
+- damo ime projektu `<projekt>.Application`
+- dodajemo treci projekt, kojem tip template odabiremo da je class lib
+- damo ime projektu `<projekt>.Contracts` (Contracts su nam contracti koje exposeamo sa apijem, response i requestovi)
+- pobrisemo placeholder model i controller iz Api layera
+- dodajemo sada referencu sa _Api_ projekta na _Application_ i _Contracts_
+
+## Stvaranje kontrakata
+
+Sada dodajemo api related kontrakte koji ce biti koristeni za komunikaciju sa klijentima
+Koraci koje radimo su sljedeci:
+
+- kreiramo 2 nova direktorija u _Contracts_ projetu koja nazovemo `Requests` i `Responses`
+- pod Requests direktorijem izradimo novu klasu `CreatePostRequest` i u nju dodamo `Title`, `CreatedAt` i `Genres` propertye koji su init only i required
+- napravimo Update kontrakt i kopiramo content (ne reuseamo Create iako su isti jer za kontrakte zelimo da zadovoljavaju ISP princip, jer se lako mogu mijenjat zahtjevi za odredene akcije)
+
+Sada kreiramo responseove:
+
+- napravimo PostResponse kojem kopiramo propertyje iz CreatePostRequesta
+- napravimo PostsResponse za mnozinu postova
+
+## Dodavanje privremene baze podataka
+
+Izradit cemo zasada in-memory reprezentaciju baze podataka koju cemo kasnije izraditi za nas blog.
+Exposeat cemo ovu privremenu bazu kroz repo u Application layeru.
+
+Koraci koje sada pratimo su:
+
+- izradimo `Repository` direktorij
+- u njega dodamo IPostRepository i PostRepository
+- kako bi mogli definirati repo metode kojima cemo manipulirati i queryjati nase podatke prvo moramo dodati modele kojima cemo operirati, pa radimo sada direktorij `Models` u App project
+- radimo Post model i dodajemo u njega propertyje (paziti na acces modifiere pritom)
+- definiramo sada metode u IPostRepo interfejsu
+- zatim ih implementiramo u PostRepou kojem damo i field koji ce biti temp db (Task koristimo jer cemo kasnije koristiti pravu db koja zahtjeva asinkrone callove)
+
+_Problem solving korak_
+
+Kako bi koristili repoe moramo ih registrirat u DIC servis kako bi ga mogli injectat u kontrolere => registriramo ga u Program.cs u Api projektu
+Koje su mane ovog pristupa i koja je alternativa?
+
+- izradimo extension metodu _AddApplication_
+- Application ne smije znati nista o tome kako ju se koristi iz drugih layera
+- `Microsoft.Extensions.DependencyInjection.Abstractions` dodamo u projekt za dodavanje apstrakcije DI-A
+- implementiramo AddApplication (ne mozemo buildat container samo smo doveli apstrakciju u App layer)
+- pozovemo ga sada iz Program.cs
+
+## Izrada controllera
+
+Kako bi imali endpoint, moramo izraditi controller koji ce handleati upitima za odreden resurs.
+Posto imamo samo `Post` entitet za sada, cilj nam je implementirati PostController prateci sljedece korake:
+
+- izradimo u Api projektu pod `Controllers` direktorijem klasu `PostsController`
+- extendamo `ControllerBase` (pogledajmo sto imamo u njemu)
+- dodamo [ApiController] atribut
+- injectamo PostsRepository
+
+## Posts create endpoint
+
+Pogledamo u postmanu sto zelimo imati po pitanju route
+POST /api/posts
+
+Kako bi izgradili _posts endpoint_, dodajemo attribute `[Route("api")]`
+Cesto mozemo vidjeti i "api/posts" praksu
+
+Nakon endpointa radimo akciju, odnosno za create otvaramo opciju POST metode na nacin da:
+
+- implementiramo Create metodu u PostsControlleru
+- kao ocekivane argumente dodamo CreatePostsRequest contract klasu
+- prefixamo request argument sa [FromBody] atributom kako bi dotnet sam izmapirao iz bodyja requesta nas model
+- dodamo attribut `[HttpPost("movies")]`
+- izmapiramo request u entitetski model
+
+```c#
+var post = new Post
+{
+    Id = Guid.NewGuid(),
+    Title = request.Title,
+    Categories = request.Categories.ToList(),
+    CreatedAt = request.CreatedAt,
+};
+```
+
+- pozovemo create metodu nad repositorijem
+- izmapiramo entitet u response contract
+- returnamo poziv `Ok(response)` koji nam stvori response objekt sa _status kodom 200_
+
+!! podsjetimo se da POST mora vratiti _201 created at_ status kod a ne _200 ok_
+Zato refaktoriramo response objekt u `Created($"/api/posts/{response.Id}", response)`
+
+## Mapping
+
+Proces konverzije iz requesta u entitet, pa kasnije iz entiteta u response se zove _mapping_ i on je vrlo cest u dotnet appovima.
+Vrlo cesto u projektima developeri koriste eksterne pakete kao sto su `Mapster`, `Automapper` i slicni.
+Opinionated je opcija ali mi cemo se fokusirati samo na custom rjesenje u svrhu ovog predavanja.
+
+Cilj mappinga je da bude sto jednostavnije.
+Kako bi separirali mapiranje na zasebno mjesto i sredili kod iz controllera:
+
+- kreirat cemo u `Api` projektu direktorij `Mapping`
+- izradimo sada klasu `ContractMapping` koja ce sadrzavati sva mapiranje contracata u projektu
+
+Sada refaktoriramo Create metodu iz PostController-a na nacin ga u ContractMappingu:
+
+- stvorimo metodu MapToPost sa potpisom
+
+```c#
+    public static Post MapToPost(this CreatePostRequest request)
+```
+
+- prebacimo mapiranje requesta u entitet iz controllera
+
+Bitno je naglasit da su mapperi plain old dummy metode i nikakva logika nesmije biti u njima.
+Razlog zasto preferiram custom mappere je taj sto su jednostavniji uredniji i laksi za odrzavati (nemamo vendor dependency).
+
+## Refaktoriranje endpointova
+
+Trenutni pain point nakon sto smo sredili mapiranje je taj sto u definiranju endpointa i ruta imamo tzv. `magicne stringove`
+Mane magicnih stringova su brojne, a dvije najvece su:
+
+1. _nedostatak intelisense pomoci_ koji dovede do cesto lapsusa u zeljenom stringu
+2. _nedostatak refactor all_ opcije koja zamjeni sve takve stringove u projektu.
+
+Kako bi se rjesili ovih problema prebacit cemo sve na centralnu lokaciju:
+
+- stvorimo staticku klasu `ApiEndpoints` u Api projektu
+- stvorimo privatni field const ApiBase koji mapira "api" dio route
+- napravimo podklasu `public static class Posts`
+- u njoj napravimo Base field `private const string Base = "${ApiBase}/posts"`
+- te dodamo Create property za POST rutu `public const string Create = Base`
+
+Sada mozemo u controlleru aplicirati ApiEndpoints klasu, pobrisemo Route atribut sa klase
+i u Route atributu od metode postavimo ApiEndpoint Create property.
+
+## Dohvat postova
+
+Sljedeca metoda po CRUD-u je read i praksa je napraviti i all i by id rute po resursu.
+Flow za izradu endpointova, sada kad imamo framework za post endpoint setupiran je sljedeci:
+
+1. dodamo rutu/e u ApiEndpoints klasi (guid constraint dodajemo koji odbija sve sto nije guid)
+
+```c#
+public const string Get = $"{Base}/{{id:guid}}";
+public const string GetAll = Base;
+```
+
+2. Implementiramo za svaki od endpointova metodu u controlleru
+3. Za get koristimo FromRoute atribut `public async Task<IActionResult> Get([FromRoute] Guid id)` koji izmapira id iz rute u nas argument
+4. Implementacija metode dohvaca po id-u post, provjerava jel pronaden i vraca NotFound ako ne ili Ok ako da
+
+Za GetAll radimo isto, osim sto dodajemo novu metodu u `ContractMapping` klasi koja mapira listu postova:
+
+```c#
+public static PostsResponse MapToResponse(this IEnumerable<Post> posts)
+{
+    return new PostsResponse
+    {
+        Posts = posts.Select(MapToResponse)
+    };
+}
+```
+
+## Refaktoriranje GET-a, opet??
+
+Create endpoint je dosta dobro ispoliran zasada, ali ono sto nam u happy pathu vraca je CreatedAt response
+Taj response bi trebao vratiti rutu na kojoj novokreiran post moze biti accessan (get single resursa post)
+Medutim u ovom trenutku imamo dosta janky rjesenje u kom mi to generiramo previse manualno konkatenacijom raznoraznih stringova u Created pozivu
+
+Dotnet nam pruza odlicnu soluciju sa `CreatedAtAction()` metodom koju cemo iskoristit na sljedeci nacin:
+
+```c#
+return CreatedAtAction(nameof(Get), new { id = response.Id }, response);
+```
+
+## Updateanje postova
+
+Nova metoda, slican flow izrade endpointa uz iznimku sto update ima i request body i route parametre koji nam trebaju (objasnit zasto)
+Flow izrade update endpointa je:
+
+1. Dodamo rutu u ApiEndpoints klasu
+2. Implementiramo mapiranje contracta u ContractMappings klasi za UpdatePostRequest klasu (primamo sada id kao parametar)
+
+```c#
+public static Post MapToPost(this UpdatePostRequest request, Guid id)
+{
+    return new Post
+    {
+        Id = id,
+        Title = request.Title,
+        Categories = request.Categories.ToList(),
+        CreatedAt = request.CreatedAt,
+    };
+}
+```
+
+3. Dodamo `UpdateAsync` poziv responseima
+4. Provjerimo jel `isUpdated` istinit i ako ne vratimo `NotFound`
+5. Ako da, mapiramo u response i vratimo Ok
+
+(Provjerimo u postmanu happy i unhappy pathove)
+
+## Delete posta
+
+Mini zadatak - code alone
+
+## Recap
+
+Kreirali smo projekt i strukturirali mu arhitekturu da ima Api, Application i Contracts layere za bolju separaciju concernova.
+Definirali smo contracts-e i dodali in-memory bazu podataka.
+Stvorili smo sve CRUD aspekte naseg posts endpointa i dodali smo mapping za citko prebacivanje modela kontrakata u biznis logic entitete.

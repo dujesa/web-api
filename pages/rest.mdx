@@ -29,7 +29,7 @@ Postoje ukupno 6 pravila za implementaciju RESTful APIja:
 
 Detaljnije i razumnije je razumjeti ovaj constraint kroz njegova podpravila:
 
-### identifikacija resursa
+### Identifikacija resursa
 
 Treba postojati jasan nacin za identificirat resurs od strane klijenta na servera
 Resurs je zapravo kao entitet, odnosno ako imamo endpoint /cars ocekujemo da fetchajemo ili manipuliramo sa car entitetima.
@@ -38,11 +38,11 @@ Resurs je zapravo kao entitet, odnosno ako imamo endpoint /cars ocekujemo da fet
 
 Resursi moraju imati uniformnu reprezentaciju i klijenti moraju moci manipulirati tim resursima putem iste reprezentacije.
 
-### self-descriptive messages
+### Self-descriptive messages
 
 Svaka reprezentacija resursa mora nositi sve informacije o tome kako treba procesirati resurs.
 
-### hypermedia as the engine of application state
+### Hypermedia as the engine of application state
 
 Klijent treba nuzno imati samo inicijalni uri resursa, pa dalje kroz komunikaciju sa serverom bi trebao biti u stanju doci do nacina kako pozvati ostale akcije.
 npr. Ako trebamo updateati/deleteati/addati novi post, treba nam samo inicijalni GET i putem hyperlinkova moramo moci kao klijent doci do ostalih akcija kao i subresursa
@@ -140,9 +140,61 @@ Kako bi se pridrzavali REST API uputa, moramo za odredene ishode na odredene akc
 Uglavnom je praksa da to bude json, ali moze biti i xml
 pr.
 
-```
+```json
 {
-    "Title": "React Query predavanje",
-    "Content": "Lorem ipsum dolor..."
+  "Title": "React Query predavanje",
+  "Content": "Lorem ipsum dolor..."
 }
 ```
+
+## Idempotency
+
+Termin koji opisuje svojstvo metode da koliko god puta neka metoda bila pozvana sa istim argumentima, uvijek ce vratiti isti rezultat.
+
+Idempotentnost HTTP metoda:
+
+- POST: Not idempotent (kada napravis usera sa jednim mailom, prvi put prode sve ostale je zauzet mail)
+- GET: Idempotent
+- PUT: Idempotent
+- DELETE: Idempotent
+
+## HATEOAS
+
+Hypermedia as the Engine of Application State
+Osnovni koncept koji pruza nacin da navigiramo putem propertyja odredenog resursa putem hyperlinkova.
+
+```json
+{
+    "account": {
+        "account": 12345,
+        "balance": {
+            "currency": "SOL",
+            "239.21"
+        },
+        "links": {
+            "deposits": "/accounts/12345/deposits",
+            "withdrawals": "/accounts/12345/withdrawals",
+            "transfers": "/accounts/12345/transfers",
+        }
+    }
+}
+```
+
+##API Errori
+Pricali smo do sada o response kodovima i happy pathovima, sada nam ostaje pitanje sto se dogada u error responseima.
+
+Api moze hendlati errore na dva nacina:
+
+1. kao Error response
+2. kao Fault response
+
+### Error
+
+Error predstavlja da je klijentov request bio invalidan i server ga nezna obraditi. Ukratko, nema greske na serveru samo je klijentov zahtjev neispravan.
+Primjer ovakvih slucajeva su responsei u klasi 4xx response kodova.
+
+### Fault
+
+Za razliku od errora, fault predstavlja situaciju u kojoj je server u problemu a klijentov request je ispravan/validan.
+Server nije u mogucnosti odgovoriti na zahtjev jer se nasao u invalidnom stanju, bilo zbog pada baze podataka, DDOS napada, buga u backend kodu i sl.
+Primjer ovakvih slucajeva su responsei u klasi 5xx response kodova.

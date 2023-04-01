@@ -1,7 +1,7 @@
 {
   "index": "DUMP Internship - Web API predavanja",
-  "overview": "Overview",
-  "rest": "REST API",
+  "rest": "REST Api",
+  "crud": "Izrada CRUD-a",
   "about": {
     "title": "About",
     "type": "page"
