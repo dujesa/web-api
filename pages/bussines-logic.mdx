@@ -1,0 +1,97 @@
+# Business logic sloj
+
+Nakon sta smo ovo odradili, ostaje nam sljedeci problem, a to je sto koristimo Repo direktno iz controllera,
+odnosno bussiness logiku implementiramo prakticki u najgornjem layeru sta odudara od n-tier arhitekturalnih pocela.
+
+Cilj je dakle izbaciti injectanje Repository objekta u controller-e iz razloga
+sto cemo dodavati bussiness logiku nadalje a ona nebi smjela zivjeti u controlleru.
+
+Kako bi separirali hendlanje business logike pratimo sljedece korake:
+
+- dodajemo `Services` direktorij u `Application` projektu
+- unutar direktorija dodajemo `IPostService` interfejs i `PostService` klasu
+- s obzirom da ce nam zasada service sluziti samo za forwardanje Repo flowa, kopirat cemo sve potpise metoda iz interfejsa Repoa, s tim da bool return value zamjenimo sa nullable post-om
+
+```c# filename="IPostService.cs"
+using Blog.Application.Models;
+
+namespace Blog.Application.Services;
+
+public interface IPostService
+{
+    Task<bool> CreateAsync(Post post);
+
+    Task<Post?> GetByIdAsync(Guid id);
+
+    Task<Post?> GetBySlugAsync(string slug);
+
+    Task<IEnumerable<Post>> GetAllAsync();
+
+    Task<Post?> UpdateAsync(Post post);
+
+    Task<Post?> DeleteByIdAsync(Guid id);
+}
+```
+
+- sada implementiramo missing membere PostService-a (forward svih osim update i delete)
+
+```c# filename="PostService.cs"
+using Blog.Application.Models;
+using Blog.Application.Repositories;
+
+namespace Blog.Application.Services;
+
+public class PostService : IPostService
+{
+    private readonly IPostRepository _postRepository;
+
+    public PostService(IPostRepository postRepository)
+    {
+        _postRepository = postRepository;
+    }
+
+    public Task<bool> CreateAsync(Post post)
+    {
+        return _postRepository.CreateAsync(post);
+    }
+
+    public Task<Post?> GetByIdAsync(Guid id)
+    {
+        return _postRepository.GetByIdAsync(id);
+    }
+
+    public Task<Post?> GetBySlugAsync(string slug)
+    {
+        return _postRepository.GetBySlugAsync(slug);
+    }
+
+    public Task<IEnumerable<Post>> GetAllAsync()
+    {
+        return _postRepository.GetAllAsync();
+    }
+
+    public async Task<Post?> UpdateAsync(Post post)
+    {
+        var postExists = await _postRepository.ExistsByIdAsync(post.Id);
+        if (!postExists)
+        {
+            return null;
+        }
+
+        await _postRepository.UpdateAsync(post);
+        return post;
+    }
+
+    public Task<bool> DeleteByIdAsync(Guid id)
+    {
+        return _postRepository.DeleteByIdAsync(id);
+    }
+}
+```
+
+- u controlleru zamjenimo repo property i injection sa servisom
+- registriramo ga u `ApplicationServiceCollectionExtensions` klasi
+
+## Validacija
+
+Next time!

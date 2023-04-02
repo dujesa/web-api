@@ -1,0 +1,466 @@
+# Dodavanje baze podataka
+
+U ovoj sekciji cemo zamjeniti nasu trenutnu in-memory bazu podataka sa pravom relacijskom bazom.
+Uz to cemo nadodati par improvementa samom apiju kako bi ga ucinili jos efikasnijim.
+
+## Slug i dohvacanje slugom
+
+Trenutno za dohvat postova koristimo id, koji je guid tipa.
+Kako bi napravili bilo koju akciju nad odredenim resursom to znaci da moramo dohvatiti njegov 16-byte zapis i encode-at ga u url.
+
+U tehnickom zargonu, zamislimo slucaj u kom zelimo dohvatiti post sa nazivom "Laravel rules".
+Za to napraviti morali bi prvo pozvati GetAll endpoint, pogledati id od posta koji matcha naziv koji trazimo,
+te nakon pronadenog id-a pozvati Get rutu za dohvatiti resurs u potpunosti (cesto get all ne vrati sve properyje resursa, vec by id).
+
+Sve to rezultira nepreglednim urlom (zbog guida u ruti) i round-tripom viska do api-ja.
+Tu uvodimo pojam `sluga`.
+
+Slug dio url-a koji jedinstveno identificira resurs. Najcesce je zapisan u `kebab-case` formatu.
+Prilikom izrade sluga bitno je odrediti property ili par properyja koji su jedinstveni predstavnik resursa.
+
+## Dodavanje sluga u projekt
+
+S obzirom na domenu postova, pretpostavit cemo (inace moramo imat constraint da budemo sigurni, ja skippajem jednostavnosti radi)
+da su kombinacija `title` i `created at` jedinstveni.
+
+Implementaciju slugifikacije radimo kroz sljedece korake:
+
+- create i update ne diramo jer je slug property generiran na backendu odnosno tice se samo bussines domene
+- dodajemo ga u response `PostResponse` contract
+- u modelu takoder dodajemo `Slug` property
+
+```c#
+    public string Slug => GenerateSlug();
+
+    private string GenerateSlug()
+    {
+        var sluggedTitle = Regex
+            .Replace(Title, "[^0-9A-Za-z _-]", string.Empty)
+            .ToLower()
+            .Replace(" ", "-");
+
+        var sluggedCreatedAt = DateOnly.FromDateTime(CreatedAt)
+            .ToString()
+            .Replace("/", "-");
+
+        return $"{sluggedTitle}-{sluggedCreatedAt}";
+    }
+```
+
+- dodamo ga u `ContractMapping` metodu `MapToResponse`
+
+Sada dodajemo i u dohvatu postova slug sa sljedecim koracima:
+
+- izmjenimo u `ApiEndpoints` klasi konst `Get` u
+
+```c#
+public const string Get = $"{Base}/{{idOrSlug}}";
+```
+
+- dodamo u `IPostRepository` `GetBySlugAsync` metodu (repo nebi trebao odlucivati cime ce se dohvacati vec controller, zato odvojene metode)
+- u `Get` ruti controllera dodamo logiku koja odlucuje koju metodu repoa pozvati
+
+```c#
+[HttpGet(ApiEndpoints.Posts.Get)]
+public async Task<IActionResult> Get([FromRoute] string idOrSlug)
+{
+    var post = Guid.TryParse(idOrSlug, out var id)
+        ? await _postRepository.GetByIdAsync(id)
+        : await _postRepository.GetBySlugAsync(idOrSlug);
+
+    if (post is null)
+    {
+        return NotFound();
+    }
+
+    var response = post.MapToResponse();
+    return Ok(response);
+}
+```
+
+- implementiramo slug dohvat metodu u `PostRepository`
+
+```c#
+public Task<Post?> GetByIdAsync(Guid id)
+{
+    var post = _posts.SingleOrDefault(p => p.Id == id);
+
+    return Task.FromResult(post);
+}
+```
+
+- _zadnji korak_ je promjeniti u `Create` endpointu routeValue iz id u `idOrSlug`, kako bi resource location radio ispravno
+
+# Integracija prave baze podataka
+
+Sada prebacujemo bazu iz in-memory u pravu Postgres DB s kojom smo do sada radili u Internshipu
+Za razliku od prethodnih predavanja pokazat cu vam koristenje Dappera umjesto EF-a.
+Razlog za _Dapper_ je taj sta sa EF-om nemamo pretjeranu potrebu za repositoryjem jer on sve rjesi sam.
+Uz Dapper dobijemo vise loose opciju apstrakcije baze podataka i tako mozemo koristiti bilo koju bazu ispod haube bilo to SQLite, Mongo, SQL server ili sta god ne.
+
+## Runnanje DB servera
+
+Kako bi izbjegao potrebu za lokalnim setupiranjem baze podataka, zarunnat cu Postgres server uz pomoc _dockera_.
+Dodajem dakle u solution levelu docker compose file
+
+```yml filename="docker-compose.yml"
+version: "3.9"
+
+services:
+  db:
+    image: postgres:latest
+    restart: always
+    environment:
+      POSTGRES_USER: dumpovac
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_BD: blog
+    ports:
+      - "5432:5432"
+```
+
+Kako bi ovo zarunnali sve sto moramo imati je instaliran docker i docker-compose alat i pokrenuti komandu:
+`docker compose up`
+
+_Dodamo sada u klijentu od Ridera bazu_ i pokazati bazu.
+
+## Infrastruktura
+
+Nakon sto smo dodali bazu trebamo dio koda koji ce nam omoguciti rad sa bazom.
+Dodajemo tako u `Application` project pakete (api nesmije znati za interakciju sa bazom zato ide u biz layer):
+
+- `Dapper` za pisanje querya koji ce manipulirati podacima iz baze
+- `Npgsql` za interakciju sa bazom podataka
+
+Dodajemo sada implementacijske detalje sljedecim koracima:
+
+- kreiramo `Database` direktorij u `Application` projektu
+- dodajemo interfejs `IDbConnectionFactory` u file `DbConnectionFactory` (nije istoiment jer cemo ubaciti vise klasa u njega)
+- kreiramo odmah u istom fileu i `NpgsqlConnectionFactory` klasu koja implementira interfejs
+- dodajemo metodu u interfesjs sa potpisom `Task<IDbConnection> CreateConnectionAsync();`
+- dodamo u Npg klasu implementaciju iste metode:
+
+```c#
+public async Task<IDbConnection> CreateConnectionAsync()
+{
+    var connection = new NpgsqlConnection(_connectionString);
+    await connection.OpenAsync();
+
+    return connection;
+}
+```
+
+- registriramo sada napravljenu klasu u DI containter
+
+```c# filename="ApplicationServiceCollectionExtensions.cs"
+public static IServiceCollection AddDatabase(this IServiceCollection services,
+    string connectionString)
+{
+    services.AddSingleton<IDbConnectionFactory>(_ =>
+        new NpgsqlConnectionFactory(connectionString));
+
+    return services;
+}
+```
+
+- dodajemo sada u `Program.cs` registraciju servicea pozivom implementirane metode, dodajemo dakle:
+
+```c# filename="Program.cs"
+...
+var config = builder.Configuration //s ovim se kacimo na konfiguracijski file
+...
+builder.Services.AddDatabase(config["Database:ConnectionString"]); //s ovim dohvacamo keyjevima content iz konfiguracijskog fajla
+...
+```
+
+- sada dodajemo pod istim keyjem u konfiguracijskom fileu `connection string`
+
+```json filename="appsettings.json"
+...
+    "Database": {
+    "ConnectionString": "Server=localhost;Port=5432;Database=postgres;User ID=dumpovac;Password=changeme;"
+    },
+...
+```
+
+### Inicijalizacija sheme baze
+
+Pokazat cu sada nacin da inicijaliziramo seed i schemu baze bez da je runnamo van dotnet aplikacije (kroz komande).
+Pratimo sljedece korake:
+
+- napravimo u `Database` direktoriju klasu `DbInitializer`
+- dodamo sljedecu implementaciju koja ukljucuje Dapper query po prvi put:
+
+```c# filename="DbInitializer.cs"
+using Dapper;
+
+namespace Blog.Application.Database;
+
+public class DbInitializer
+{
+    private readonly IDbConnectionFactory _dbConnectionFactory;
+
+    public DbInitializer(IDbConnectionFactory dbConnectionFactory)
+    {
+        _dbConnectionFactory = dbConnectionFactory;
+    }
+
+    public async Task InitializeAsync()
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+
+        await connection.ExecuteAsync("""
+            create table if not exists posts (
+            id UUID primary key,
+            slug TEXT not null,
+            title TEXT not null,
+            createdat date not null);
+        """);
+
+        await connection.ExecuteAsync("""
+            create unique index concurrently if not exists posts_slug_idx
+            on posts
+            using btree(slug);
+        """);
+
+        await connection.ExecuteAsync("""
+            create table if not exists genres (
+            postId UUID references posts (Id),
+            name TEXT not null);
+        """);
+    }
+}
+```
+
+- dodat cemo tablicu `genres` u migraciji kako bi izbjegli csv zapisivanje istih
+
+- napravili smo schemu u prvom queryju
+- stvorili smo `index` na `slug` columnu tablice koristeci btree (s ovim dobijemo performantnije readove na slug fieldu)
+- registriramo jos u `AddDatabase` metodi DbInitializer kao AddSingleton
+
+```c#
+services.AddSingleton<DbInitializer>();
+```
+
+- te da bi izvrsili ovaj execution migracije u Program.cs-u dohvacamo servis iz containera i pozovemo `InitializeAsync`
+
+```c# filename="Program.cs"
+...
+var dbInitializer = app.Services.GetRequiredService<DbInitializer>();
+await dbInitializer.InitializeAsync();
+
+app.Run();
+```
+
+- zarunnamo projekt i pokazemo u exploreru da imamo tablicu i index (u modify table desnom kliku)
+
+## Uklanjanje in-memory tied koda
+
+Kako bi dovrsili tranziciju na postgres DB moramo jos srediti repozitorije jer smo ih napravili coupleane uz in-memory bazu.
+Prednost koristenja repo patterna je sada ocita, kompletan kod aplikacije ostaje isti osim repo-a koji apstrahira operacije nad DB.
+
+Koraci koje pratimo su sljedeci:
+
+- u `PostRepository` pobrisemo sve implementacije koje trenutno imamo u metodama i dry-runnamo implementaciju metoda
+- uklonimo i `_posts` field
+- dodamo odma i u `IPostRepository` `Task<bool> ExistsByIdAsync(Guid id);` posto ce nam trebati
+- dodamo injectamo connection factory u repo
+
+```c# filename="PostRepository.cs"
+private readonly IDbConnectionFactory _dbConnectionFactory;
+
+public PostRepository(IDbConnectionFactory dbConnectionFactory)
+{
+    _dbConnectionFactory = dbConnectionFactory;
+}
+```
+
+Sada implementiramo crud metode u PostRepository-ju, a flow je sljedeci:
+
+- prebacimo metodu da je asinkrona
+- otvorimo konekciju na bazu
+- s obzirom da sada unosimo u dvije tablice `posts` i `categories`, otvorit cemo transakciju na bazu
+- za kreaciju radimo sljedeci insert dapper query (@Title dohvaca property Title na objektu koji je prosljeden kao zadnji parametar)
+
+```c#
+public async Task<bool> CreateAsync(Post post)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+    using var transaction = connection.BeginTransaction();
+
+    var result = await connection.ExecuteAsync(new CommandDefinition(@"
+        insert into posts (id, slug, title, createdat)
+        values (@Id, @Slug, @Title, @CreatedAt)
+    ", post));
+
+    if (result < 0)
+    {
+        return false;
+    }
+
+    foreach (var category in post.Categories)
+    {
+        await connection.ExecuteAsync(new CommandDefinition(@"
+            insert into categories (postId, name)
+            values (@PostId, @Name)
+        ", new { PostId = post.Id, Name = category }));
+    }
+
+    transaction.Commit();
+
+    return result > 0;
+}
+
+```
+
+Implementirat cemo sada i preostale akcije
+
+1. Dohvat posta po id-u
+
+```c#
+public async Task<Post?> GetByIdAsync(Guid id)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+
+    var post = await connection.QuerySingleOrDefaultAsync<Post>(
+        new CommandDefinition(@"
+            select * from posts where id = @Id
+        ", new { id }));
+
+    if (post is null)
+    {
+        return null;
+    }
+
+    var categories = await connection.QueryAsync<string>(
+        new CommandDefinition(@"
+            select name from categories where postId = @Id
+        "));
+
+    foreach (var category in categories)
+    {
+        post.Categories.Add(category);
+    }
+
+    return post;
+}
+```
+
+2. Dohvat posta po slug-u
+
+```c#
+public async Task<Post?> GetBySlugAsync(string slug)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+
+    var post = await connection.QuerySingleOrDefaultAsync<Post>(
+        new CommandDefinition(@"
+            select * from posts where slug = @slug
+        ", new { slug }));
+
+    if (post is null)
+    {
+        return null;
+    }
+
+    var categories = await connection.QueryAsync<string>(
+        new CommandDefinition(@"
+            select name from categories where postId = @id
+        ", new { id = post.Id }));
+
+    foreach (var category in categories)
+    {
+        post.Categories.Add(category);
+    }
+
+    return post;
+}
+```
+
+3. Dohvat svih postova - izbjegnut roundtrip do baze za svaki dohvat kategorija (n+1), tako da left joinam
+   i matcham na post.id i onda agregiram string sa zarezom za separaciju
+
+```c#
+public async Task<IEnumerable<Post>> GetAllAsync()
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+    var result = await connection.QueryAsync(new CommandDefinition(@"
+        select p.*, string_agg(c.name, ',') as categories
+        from posts p left join categories c on p.id = c.postId
+        group by id
+    "));
+
+    return result.Select(x => new Post
+    {
+        Id = x.id,
+        Title = x.title,
+        CreatedAt = x.createdat,
+        Categories = Enumerable.ToList(x.categories.Split(','))
+    });
+}
+```
+
+4. Exists by id metoda - count(1) koji nam vraca 0 ili 1 sto mapiramo u boolean
+
+```c#
+public async Task<bool> ExistsByIdAsync(Guid id)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+
+    return await connection.ExecuteScalarAsync<bool>(new CommandDefinition(@"
+        select count(1) from posts where id = @id
+    "), new { id });
+}
+```
+
+5. Update metoda
+
+```c#
+public async Task<bool> UpdateAsync(Post post)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+    using var transaction = connection.BeginTransaction();
+
+    await connection.ExecuteAsync(new CommandDefinition(@"
+        delete from categories where postid = @id
+    ", new { id = post.Id }));
+
+    foreach (var category in post.Categories)
+    {
+        await connection.ExecuteAsync(new CommandDefinition(@"
+            insert info categories (postId, name)
+            values (@PostId, @Name)
+        ", new { PostId = post.Id, Name = category }));
+    }
+
+    var result = await connection.ExecuteAsync(new CommandDefinition(@"
+        update posts set slug = @Slug, title = @Title, createdat = @CreatedAt
+        where id = @Id
+    ", post));
+
+    transaction.Commit();
+    return result > 0;
+}
+```
+
+6. Delete metoda
+
+```c#
+public async Task<bool> DeleteByIdAsync(Guid id)
+{
+    using var connection = await _dbConnectionFactory.CreateConnectionAsync();
+    using var transaction = connection.BeginTransaction();
+
+    await connection.ExecuteAsync(new CommandDefinition(@"
+        delete from categories where postid = @id
+    ", new { id }));
+
+    var result = await connection.ExecuteAsync(new CommandDefinition(@"
+        delete from posts where id = @id
+    ", new { id }));
+
+    transaction.Commit();
+    return result > 0;
+}
+```
+
+Isprobajmo sve sada.

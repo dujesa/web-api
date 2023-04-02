@@ -1,15 +1,13 @@
 {
   "index": "DUMP Internship - Web API predavanja",
   "rest": "REST Api",
-  "crud": "Izrada CRUD-a",
-  "about": {
-    "title": "About",
-    "type": "page"
-  },
-  "contact": {
-    "title": "Contact ↗",
+  "basic-crud": "Izrada osnovnog CRUD-a",
+  "real-db": "Integracija sa pravom DB",
+  "bussines-logic": "Bussines/domain layer",
+  "project": {
+    "title": "Project ↗",
     "type": "page",
-    "href": "https://twitter.com/shuding_",
+    "href": "https://github.com/dujesa/blog",
     "newWindow": true
   }
 }
