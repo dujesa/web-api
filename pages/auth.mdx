@@ -1,0 +1,281 @@
+# Autentikacija i autorizacija
+
+Autentikacija i autorizacija su dva koncepta jako bitna za citav scope web api-ja. 
+Bitno je naglasit da su potpuno razliciti i nepovezani koncepti.
+
+`Autentikacija` je proces verifikacije tko i sto je user.
+`Autorizacija` je proces verifikacije sto user moze napraviti (jeli gost ili admin, jel moze uredit resurs, samo ga procitat ili nijedno od toga)
+
+Upravo cemo se na to fokusirati u ovoj sekciji, nece se user logirati u nas api, nego ce nam slat nekakav token i mi cemo se pobrinit o njemu.
+
+## Kako auth funkcionira
+
+U sljedecim primjerima cemo napraviti servis koji fake generira auth token, jer nam nije bitno tko generira token, samo nam je bitan njegov **content i jeli orginalan**.
+
+Sljedece pitanje koje si mozete postavit je kako nas api moze zapamtiti userov identitet ako je api stateless po definiciji.
+Nacin na koji auth funkcionira je da imamo token i passamo ga prilikom svakog requesta. Api prilikom primanja requesta sa tokenom validira taj token.
+Token moze biti izgeneriran od strane bilo kog servisa, Azure AD, AWS congito, Identity server,...
+
+Token koji nas generatorski servis izradi se zove `JSON Web token`, skraceno `JWT` i on sadrzi infoe o tome sto user smije i nesmije raditi po apiju.
+
+## JSON Web Token
+
+Kako bi lakse vizualizirali sto je "jot" koristiti cemo site: https://jwt.io/
+
+
+## Hands on demo
+
+U Helpers direktoriju cemo dodati `Identity.Api` projekt u kom cemo implementirati fake servis koji ce generirati real world JWT.
+
+Na prvu samo vidimo u reprezentaciji "jot"-a samo nakupinu slova i brojeva, ali probat cemo izanalizirati kako ga mozemo iscitati.
+Struktura "jot"a je trodijelna, odnosno sastoji se od:
+1. Header-a - sadrzi tip tokena i algoritam za izgenerirati signature
+2. Payloada - main content tokena, sadrzi claimove i nesmije imati nikakve secrete!!!
+3. Signaturea - kljuc funkcioniranja JWT-a, kreatore signa header i payload i sa keyem izgenerira signature
+
+Svaka sekcija je odijeljena sa tockom.
+Bitno je naglasiti da sa pub keyem mozemo lako dekodirati content jwt-a i da se u njemu nalazi samo sto user smije raditi tko je issuer tokena, tko je audience kada istice i sl., *nikakve osjetljive podatke niti secrete*.
+
+Nacin na koji su u jwt tokenu zapisane akcije koje su dozvoljene korisniku se zovu `claimovi`.
+Neki claimovi su standardni (jti - jwt id, sub - subject, nbf - not valid before, exp, iat - issued at, iss - issuer, aud - audience)
+
+Kako bi jwt bio validiran od strane servisa koji ga koristi, sve sto ima napraviti taj servis je pratiti isti proces kojim je signature dobiven od strane issuera, te potvrditi da su isti ovaj signature u jwt-u i ovaj kojeg on dobije.
+Ako ne matchaju, znaci da je payload ili header izmjenjen usput (demonstrirat na siteu)
+
+## Implementacija servisa za generiranje JWT-a
+
+Dodat cemo fake servis pod Identity.Api dotnet 7.0 web api projekt u odvojenom helpers direktoriju (kako bi ga eventualno mogli shareati sa nekim drugim projektima koje nekad kasnije budemo radili, a ne da je zakucan u nas projekt).
+
+Dodamo nuget `System.IdentityModel.Tokens.Jwt`
+
+Dodamo zatim Request klasu i Controller za generiranje jwt tokena.
+
+```c# filename="TokenGenerationRequest.cs"
+namespace Identity.Api;
+
+public class TokenGenerationRequest
+{
+    public Guid UserId { get; set; }
+    public string Email { get; set; }
+    public Dictionary<string, object> CustomClaims { get; set; } = new();
+}
+```
+
+```c# filename="IdentityController.cs"
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+
+namespace Identity.Api.Controllers;
+
+[ApiController]
+public class IdentityController : ControllerBase
+{
+    private const string TokenSecret = "DumpDevInternship2023=<3"; // symmetric token secret
+    private static readonly TimeSpan TokenLifetime = TimeSpan.FromHours(8);
+
+    [HttpPost("token")]
+    public IActionResult GenerateToken(
+        [FromBody] TokenGenerationRequest request)
+    {
+        var tokenHandler = new JwtSecurityTokenHandler();
+        var key = Encoding.UTF8.GetBytes(TokenSecret);
+
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(JwtRegisteredClaimNames.Sub, request.Email),
+            new(JwtRegisteredClaimNames.Email, request.Email),
+            new("userid", request.UserId.ToString()),
+        };
+
+        foreach (var claimPair in request.CustomClaims)
+        {
+            var jsonElement = (JsonElement)claimPair.Value;
+            var valueType = jsonElement.ValueKind switch
+            {
+                JsonValueKind.True => ClaimValueTypes.Boolean,
+                JsonValueKind.False => ClaimValueTypes.Boolean,
+                JsonValueKind.Number => ClaimValueTypes.Double,
+                _ => ClaimValueTypes.String
+            };
+
+            var claim = new Claim(claimPair.Key, claimPair.Value.ToString()!, valueType);
+            claims.Add(claim);
+        }
+
+        var tokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(claims),
+            Expires = DateTime.UtcNow.Add(TokenLifetime),
+            Issuer = "https://id.internship-webapi.com",
+            Audience = "https://posts.internship-weapi.com",
+            SigningCredentials =
+                new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+        };
+
+        var token = tokenHandler.CreateToken(tokenDescriptor);
+
+        var jwt = tokenHandler.WriteToken(token);
+        return Ok(jwt);
+    }
+}
+```
+
+I zatim isprobamo u Postmanu endpoint i dodavanje custom claimova.
+Jos jednom treba napomenuti da nije bitno tko generira JWT token, bitno je da je on validan u momentu kad ga nas servis koristi za auth usera. (zato primjer sa odvojenim generatorom)
+
+## Implementacija JWT autentikacije i autorizacije
+
+Pratimo sljedece korake:
+1. U `Posts.Api` projekt dodajem nuget `Microsoft.AspNetCore.Authentication.JwtBearer`
+2. U `Program.cs` tik iznad *AddControllers* poziva dodajemo authentikaciju i jwt bearer konfiguraciju (u nasem slucaju koristimo simetricni kljuc za `issuerSigningKey` jer je najjednostavniji, ali mozemo u public key cryptography ili certifikate)
+(Bitno je samo naglasit da je simetricni kljuc najjednostavniji nacin ali treba biti oprezan da key ne leakamo i da ga rotiramo, jer ako leaka bilo tko moze izgenerirati nas token)
+
+```c# filename="Program.cs"
+...
+builder.Services.AddAuthentication(x =>
+{
+    x.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    x.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    x.DefaultScheme = JwtBearerDefaults.AuthenticationScheme;
+}).AddJwtBearer(x =>
+{
+    x.TokenValidationParameters = new TokenValidationParameters
+    {
+        IssuerSigningKey = new SymmetricSecurityKey(
+            Encoding.UTF8.GetBytes(config["Jwt:Key"]!)),
+        ValidateIssuerSigningKey = true,
+        ValidateLifetime = true,
+        ValidIssuer = config["Jwt:Issuer"],
+        ValidAudience = config["Jwt:Audience"],
+        ValidateIssuer = true,
+        ValidateAudience = true
+    };
+});
+
+builder.Services.AddAuthorization();
+
+buidler.Services.AddControllers...
+...
+```
+
+Takoder bitno je naglasit da u produkciji *nesmijemo kljuc* spremati u appsettings.jsonu ili bilo kom in-project fileu vec u separiranim `secret managerima` kao sto su `Azure Key Vault` ili `AWS Secret manager`. 
+3. U nasem slucaju, jednostavnosti radi, setupiramo key metadata u `appsettings.json` sa keyeom, issuerom (tko generira token) i audience (za koga je token namjenjen - razlika google docs i google photos audience) na sljedeci nacin:
+
+```json filename="appsettings.json"
+...
+  "Jwt": {
+    "Key": "DumpDevInternship2023=<3",
+    "Issuer": "https://id.internship-webapi.com",
+    "Audience": "https://posts.internship-weapi.com"
+  },
+...
+```
+
+4. Dodamo poziv `app.UseAuthentication();` iznad useanja authorizacije u `Program.cs` file-U
+
+Isprobajmo sada Get endpoint za Postove i vidimo da uredno sve radi bez autha. Zasto?!
+
+## Koristenje auth-a u endpointovima
+
+Kako zahtjevali autorizaciju nad odredenim endpointovima dodamo `[Authorize]` attribute iznad kontrolera.
+
+Ako sada pozovemo endpoint vidimo da dobijemo `401 unauthorized`, sto je zeljeno ponasanje jer nismo prosljedili nikakav validan token.
+Kako bi ga prosljedili, u headers tabu u Postmanu dodajemo header par `Authorization: Bearer {token}`
+
+Probajmo sada sa validnim i izmjenjenim keyevima, te kroz https://jwt.io/ probajmo promjeniti jedan claim i vratiti isti signature i pokazati da ni to ne autorizira.
+
+Takoder da bi optimizirali rad u Postmanu mozemo u Authorization tabu postaviti type na inherit from collection i onda u collectionu Bearer token na value dobiven generator apijem.
+
+### Otvaranje endpointovima
+
+U ovom slucaju kada lockamo cijeli jedan endpoint, da bi rute otvarali anonimnim requestima, moramo zasebno za svaku metodu koju zalimo otvoriti dodati attribute `[AllowAnonymous]`
+
+## Limitiranje akcija za admina/po roli
+
+Za sada smo pokazali kako autorizirati bilo kog autenticiranog usera ili zabraniti pristup svim neautenticiranim userima pristup nasim endpointovima.
+
+To nam je korisno za minimalnu kontrolu, medutim u real-world slucajevima ce nam trebati puno granuralnija kontrola autorizacije nad odredenim akcijama.
+npr. Zelimo da kreirati/editirati/brisati postove mogu samo administratori, a dohvatiti moze bilo tko
+
+### Policy
+
+Kako bi implementirali granularniju kontrolu nad autorizacijom moramo kreirati `policy koji listena za odreden claim`.
+Implementiramo ga na sljedeci nacin:
+1. Vracamo se ponovno u `Program.cs` i dodajemo u AddAuthorization poziv sljedecu lambdu koja definira da token mora imati claim `admin` sa valueom `true`:
+
+```c# filename="Program.cs"
+...
+builder.Services.AddAuthorization(x =>
+{
+    x.AddPolicy("Admin", p => p.RequireClaim("admin", "true"));
+});
+...
+```
+
+2. Applyjamo policy na odredene akcije, odnosno, uklonimo controller level atribut `[Authorize]` i postavimo npr na Create metodu policy based:
+ 
+ ```c# filename="PostsController.cs"
+ ...
+    [Authorize("admin")]
+    [HttpPost(ApiEndpoints.Posts.Create)]
+    public async Task<IActionResult> Create([FromBody] CreatePostRequest request,
+        CancellationToken token)
+    {
+        var post = request.MapToPost();
+
+        await _postService.CreateAsync(post, token);
+
+        var response = post.MapToResponse();
+        return CreatedAtAction(nameof(Get), new { idOrSlug = response.Id }, response);
+    }
+...
+ ```
+
+3. Dodamo policy based authorizaciju na Update i Delete metode
+
+4. Uklonimo `AllowAnonymous` atibut iz ranijeg primjera jer nam je sada endpoint po defaultu otvoren jer smo makli controller level `Authorize`
+
+Sada probajmo Postmanom endpoint i vidimo da dobijamo `403 Forbidden`, a ne unauthorized, sto znaci da smo autenticirani al nismo autorizirani za tu akciju.
+
+Da jos malo improveamo kod i uklonimo magicne stringove, dodajemo `AuthConstants` klasu direkt u Api projekt sa contentom:
+
+```c# filename="AuthConstants.cs"
+namespace Blog.Api;
+
+public static class AuthConstants
+{
+    public const string AdminUserPolicyName = "Admin";
+    public const string AdminUserClaimName = "admin";
+}
+```
+
+Pa ih useamo u `Program.cs`-u i u `controller atributima`.
+
+## Limitiranje akcija za trusted membera
+
+U identity payloadu imamo i `trusted_member` claim i recimo da njima zelimo dozvoliti kreaciju i update a adminu samo delete.
+Dodajemo sada novi policy na isti nacin kao i prije:
+1. U `Program.cs` dodajemo:
+
+```c#
+builder.Services.AddAuthorization(x =>
+{
+    x.AddPolicy(AuthConstants.AdminUserPolicyName,
+        p => p.RequireClaim(AuthConstants.AdminUserClaimName, "true"));
+    
+    x.AddPolicy(AuthConstants.TrustMemberPolicyName,
+        p => p.RequireAssertion(c =>
+            c.User.HasClaim(m => m is { Type: AuthConstants.AdminUserClaimName, Value: "true"}) ||
+            c.User.HasClaim(m => m is { Type: AuthConstants.TrustedMemberClaimName, Value: "true" })));
+});
+```
+
+2. U controlleru za kreaciju i update dodajemo policyje za trusted membera sa attributeima:
+[Authorize(AuthConstants.TrustedMemberPolicyName)]
+
+Isprobajmo sada jos jednom sve opcije

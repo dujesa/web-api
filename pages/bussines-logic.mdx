@@ -94,4 +94,159 @@ public class PostService : IPostService
 
 ## Validacija
 
-Next time!
+Postoje dva tipa validacije koje imamo u web api projektima:
+- api validaciju koja validira jesu li contracti onakvi kakvi trebaju biti
+- business level validaciju koja provjerava jel ono sto cemo kreirati/s cime cemo operirati validno
+
+
+U svrhe ovog predavanja cemo se zadrzati samo na business validaciji.
+A kako nebi u Serviceima samo if checkali svaki property dodat cemo nuget paket `FluentValidation.DependencyInjection`.
+Uz pomoc FluentValidation paketa cemo moci opisati kako zelimo da izgleda validan model na fluentan i citljiv nacin.
+
+Kako bi implementirali validaciju dodajemo u *Application layeru* `Validators/` direktorij.
+U direktorij dodajemo odma PostValidator klasu koja izgleda ovako:
+
+```c# filename="PostValidator.cs"
+using Blog.Application.Models;
+using Blog.Application.Repositories;
+using FluentValidation;
+
+namespace Blog.Application.Validators;
+
+public class PostValidator : AbstractValidator<Post>
+{
+    private readonly IPostRepository _postRepository;
+    
+    public PostValidator(IPostRepository postRepository)
+    {
+        _postRepository = postRepository;
+        
+        RuleFor(x => x.Id)
+            .NotEmpty();
+
+        RuleFor(x => x.Categories)
+            .NotEmpty();
+
+        RuleFor(x => x.Title)
+            .NotEmpty();
+
+        RuleFor(x => x.CreatedAt)
+            .LessThanOrEqualTo(DateTime.UtcNow);
+
+        RuleFor(x => x.Slug)
+            .MustAsync(ValidateSlug)
+            .WithMessage("This post already exists in the system");
+    }
+
+    private async Task<bool> ValidateSlug(Post post, string slug, CancellationToken token)
+    {
+        var existingPost = await _postRepository.GetBySlugAsync(slug);
+
+        if (existingPost is null)
+            return false;
+
+        return existingPost.Id == post.Id;
+    }
+}
+```
+
+Primjetimo logiku oko Slug validacije koja ovisi o stanju u bazi, pa zato i imamo custom validacijsku logiku.
+
+Sada moramo registrirati ovaj model validator. A ovog puta, umjesto da registriramo jedan po jedan, registrirat cemo ih dinamicki u momentu kad ih kreiramo.
+To radimo na sljedeci nacin:
+1. u `ApplicationServiceCollectionExtensions` dodajemo poziv `AddValidatorsFromAssemblyContaining<>`
+2. Kreiramo Marker `IApplicationMarker` s kojim identificiramo Application assembly
+3. Posto injectamo singleton (zelimo da se jednom instancira prilikom pokretanja appa) kao parametar prosljedimo `ServiceLifetime.Singleton`
+
+
+I sada u Serviceu injecttamo Validator i validiramo model, npr u CreateAsync metodi:
+```c#
+public async Task<bool> CreateAsync(Post post)
+{
+    var result = _postValidator.ValidateAsync(post);
+    return await _postRepository.CreateAsync(post);
+}
+```
+
+Problem ovdje je sto u slucaju ne prolaska validacije api vrati error kojeg bi mi manualno morali mapirati u 400 response.
+Ono sta radije zelimo u ovom slucaju je vratiti ValidationException iz CreateAsync servisne metode, pa exception hvatamo u api layeru i mapiramo ga u zeljeni mapping response.
+Da bi to postigli:
+1. pozivamo `ValidateAndThrowAsync` u create i update metodama.
+2. u API projektu u direktoriju `Mapping/` dodajemo `ValidationMappingMiddleware` klasu sa sljedecim kodom:
+```c# filename="ValidationMappingMiddleware.cs"
+using Blog.Contracts.Responses;
+using FluentValidation;
+
+namespace Blog.Api.Mapping;
+
+public class ValidationMappingMiddleware
+{
+    private readonly RequestDelegate _next;
+
+    public ValidationMappingMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(HttpContext httpContext)
+    {
+        try
+        {
+            await _next(httpContext);
+        }
+        catch (ValidationException ex)
+        {
+            httpContext.Response.StatusCode = 400;
+            var validationFailureResponse = new ValidationFailureResponse
+            {
+                Errors = ex.Errors.Select(x => new ValidationResponse
+                {
+                    PropertyName = x.PropertyName,
+                    Message = x.ErrorMessage,
+                })
+            };
+
+            await httpContext.Response.WriteAsJsonAsync(validationFailureResponse);
+        }
+    }
+}
+```
+
+3. Dodajemo zatim `ValidationFailureResponse.cs` file i u njega implementiramo sljedece dvije klase:
+```c# filename="ValidationFailureResponse.cs"
+namespace Blog.Contracts.Responses;
+
+public class ValidationFailureResponse
+{
+    public IEnumerable<ValidationResponse> Errors { get; init; }
+}
+
+public class ValidationResponse
+{
+    public string PropertyName { get; init; }
+    public string Message { get; init; }
+}
+```
+
+4. za kraj registriramo middleware, za kojeg je bitno napomenut da je sekvencijalan, odnosno moramo ga u pipelineu registrirati prije controllera (kad bude izlazia put van da catcha ex iz controllera)
+I to radmo na slj nacin:
+```c#
+app.UseMiddleware<ValidationMappingMiddleware>();
+```
+
+5. Isprobamo api pozivanje
+
+## CancellationToken - best practices
+Svaki put kada neko pozove api endpoint, kroz postman, kao klijent ili na koji god drugi nacin, postoji opcija da cancellaju taj request.
+U momentu kada cancellaju taj request u ovom nasem trenutnom slucaju jos uvijek ce nam se puni flow akcije izvrsiti, 
+odnosno otic cemo do baze queryjati ono sto je zatrazeno i to rezultira tracenjem resursa uzalud pa cak i kreirati resurs iako je cancellan.
+
+CancellationToken nam pomaze da otkazemo taj request koji je cancelan.
+CancellationToken je viralan, odnosno moramo ga parametrizirati top to bottom u svakoj metodi jednog punog flowa.
+
+Za pocetak cemo demonstrirati CancellationToken sa breakpointom u Create controller metodi.
+
+Dalje dodajemo u servis, repo i na kraju u dappr (koji uz pomoc CommandDefinitiona exposea interejs za cancellation token)
+Mozemo primjetiti da se vrlo brzo zabloata nas kod, ali bitno je naglasit da ipak benefit koji pruza sustav za cancellanje je puno veci od mana ovakvog bloata.
+
+Takoder za kao zadnji case, mozemo prosljediti i u DbConnectionFactory cancellation token
