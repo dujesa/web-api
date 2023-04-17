@@ -4,6 +4,7 @@
   "basic-crud": "Izrada osnovnog CRUD-a",
   "real-db": "Integracija sa pravom DB",
   "bussines-logic": "Bussines/domain layer",
+  "auth": "Auth",
   "project": {
     "title": "Project ↗",
     "type": "page",
