@@ -7,7 +7,7 @@ Za to nam treba koncept zvan `filtriranje resursa` u kom cemo endpointu prosljed
 
 Za implementirati filtriranje ici cemo ovaj put top to bottom pristupom:
 1. Dodajemo u controller GetAll metodu filter opciju na nacin da prvo dodamo novi Request tip putem kojeg cemo exposeati filter opcije:
-```c# filename='GetAllPostsRequest.cs'
+```c# filename="GetAllPostsRequest.cs"
 public class GetAllPostsRequest
 {
     public string? Title { get; set; }
@@ -19,7 +19,7 @@ Oba su propa nullable jer nije nuzno aplicirati filtriranje vec je potpuna kontr
 2. Izmjenimo potpis metode u controlleru sa `FromQuery` atributom koji ce dotnet sam izmapirati iz url rute u nas request objekt:
 
 3. Dodamo opcionalno mapiranje (isto kao sti imamo za iz/u request u/iz domain object) domain specific Options object. Dodajemo dakle u `/Models` direktorij 
-```c# filename='GetAllMoviesOptions.cs'
+```c# filename="GetAllMoviesOptions.cs"
 public class GetAllPostsOptions
 {
     public string? Title { get; set; }
@@ -29,7 +29,7 @@ public class GetAllPostsOptions
 ```
 
 4. Dodamo mapiranje u options object
-```c# filename='ContractMapping.cs'
+```c# filename="ContractMapping.cs"
 ...
     public static GetAllPostsOptions MapToOptions(this GetAllPostsRequest request)
     {
@@ -51,7 +51,7 @@ public class GetAllPostsOptions
 ```
 
 5. Dodamo validator za Options objekt
-```c# filename='GetAllPostsOptionsValidator.cs'
+```c# filename="GetAllPostsOptionsValidator.cs"
 public class GetAllPostsOptionsValidator : AbstractValidator<GetAllPostsOptions>
 {
     public GetAllPostsOptionsValidator()
@@ -63,7 +63,7 @@ public class GetAllPostsOptionsValidator : AbstractValidator<GetAllPostsOptions>
 ```
 
 6. Izmjenimo sada u servisu options kao argument jedini argument
-```c# filename='PostService.cs'
+```c# filename="PostService.cs"
  private readonly IValidator<GetAllPostsOptions> _optionsValidator;
 
     public PostService(IPostRepository postRepository, IValidator<Post> postValidator, IRatingRepository ratingRepository, IValidator<GetAllPostsOptions> optionsValidator)
@@ -80,7 +80,7 @@ public class GetAllPostsOptionsValidator : AbstractValidator<GetAllPostsOptions>
 
 7. Izmjenimo implementaciju sql queryja za dohvat svih postova u sljedecu (dodajemo logiku filtiranja godine releasa i titlea):
 
-```c# filename='PostRepository.cs'
+```c# filename="PostRepository.cs"
     public async Task<IEnumerable<Post>> GetAllAsync(GetAllPostsOptions options, CancellationToken token = default)
     {
         using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
@@ -120,13 +120,13 @@ Standardan nacin exposeanja sorta je kroz mixanje propertyja po kom sortiramo i 
 
 Pa implementirajmo sorter za postove. Idemo top to bottom implementacijom jos jednom:
 1. Dodajemo property za sortiranje u `GetAllPostsRequest`
-```c# filename='GetAllPostsRequest.cs'
+```c# filename="GetAllPostsRequest.cs"
 ...
     public required string? SortBy { get; init; }
 ```
 
 2. Dodajmo translaciju u MapToOptions metodi mappera:
-```c# filename='ContractMapping.cs'
+```c# filename="ContractMapping.cs"
     public static GetAllPostsOptions MapToOptions(this GetAllPostsRequest request)
     {
         return new GetAllPostsOptions
@@ -142,7 +142,7 @@ Pa implementirajmo sorter za postove. Idemo top to bottom implementacijom jos je
 
 
 3. prosirimo options object
-```c# filename='GetAllPostsOptions.cs'
+```c# filename="GetAllPostsOptions.cs"
 public class GetAllPostsOptions
 {
     public string? Title { get; set; }
@@ -161,7 +161,7 @@ public enum SortOrder
 ```
 
 4. Updateamo repository sql kod:
-```c# filename='PostRepository.cs'
+```c# filename="PostRepository.cs"
     public async Task<IEnumerable<Post>> GetAllAsync(GetAllPostsOptions options, CancellationToken token = default)
     {
         using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
@@ -199,7 +199,7 @@ public enum SortOrder
 
 5. Dodamo prihvatljive sort propertyje u validator kako bi izbjegli potencijalni sql injection napad:
 
-```c# filename=''GetAllPostsOptionsValidator.cs   
+```c# filename="GetAllPostsOptionsValidator.cs"
 public class GetAllPostsOptionsValidator : AbstractValidator<GetAllPostsOptions>
 {
     private static readonly string[] AcceptableSortFields =

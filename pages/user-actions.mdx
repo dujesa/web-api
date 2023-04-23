@@ -63,7 +63,7 @@ Postavlja se pitanje kako dohvatiti id od usera iz negovot jwt tokena.
 Trenutno imamo userid koji je claim, pa startna tocka za implementaciju zeljenog dohvata je sljedeca:
 1. dodajemo u `Api` projekt `Auth/` direktorij i u njega prebacimo `AuthConstants` klasu sa svim konstante bitne za autentikaciju:
 2. napravimo u istom direktoriju novu klasu `IdentityExtensions` sa kojom extendamo HttpContext na sljedeci nacin:
-```c# filename='IdentityExtensions.cs'
+```c# filename="IdentityExtensions.cs"
 public static class IdentityExtensions
 {
     public static Guid? GetUserId(this HttpContext context)
@@ -94,7 +94,7 @@ var post = Guid.TryParse(idOrSlug, out var id)
 - Update
 
 4. Sada moramo promjeniti interfejsove za PostService i PostRepo na nacin da primaju kao argument userId
-```c# filename='IPostService.cs'
+```c# filename="IPostService.cs"
     Task<Post?> GetByIdAsync(Guid id, Guid? userId = default, CancellationToken token = default);
 
     Task<Post?> GetBySlugAsync(string slug, Guid? userId = default, CancellationToken token = default);
@@ -139,7 +139,7 @@ var post = Guid.TryParse(idOrSlug, out var id)
 ```
 
 8. Dodamo `IRatingRepository`:
-```c# filename='IRatingRepository.cs'
+```c# filename="IRatingRepository.cs"
 public interface IRatingRepository
 {
     Task<float?> GetRatingAsync(Guid postId, CancellationToken token = default);
@@ -149,7 +149,7 @@ public interface IRatingRepository
 
 
 i `RatingRepository`:
-```c# filename='RatingRepository.cs'
+```c# filename="RatingRepository.cs"
 public class RatingRepository : IRatingRepository
 {
     private readonly IDbConnectionFactory _dbConnectionFactory;
@@ -190,7 +190,7 @@ public class RatingRepository : IRatingRepository
 9. Registriramo novi repo u DI container
 
 10. Izmjenimo PostServis update metodu na nacin da injectamo novi repo i koristimo ga u sljedecoj implementaciji:
-```c# filename='PostService.cs'
+```c# filename="PostService.cs"
 ...
     public async Task<Post?> UpdateAsync(Post post, Guid? userId = default, CancellationToken token = default)
     {
@@ -230,7 +230,7 @@ Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken
 ```
 
 2. Implementiramo istu metodu u repou:
-```c# filename='RatingRepository.cs'
+```c# filename="RatingRepository.cs"
     public async Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default)
     {
         using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
@@ -248,12 +248,12 @@ Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken
 ^^ Mozemo primjetiti da gornji query ima flow *UPSERT*-a, odnosno update ako postoji a insert ako ne postoji entitet
 
 3. Umjesto da dodamo logiku ocjenjivanja u PostService odvojit cemo ga u `RatingService`, pa za to napravimo interfejs
-```c# filename='IRatingService.cs'
+```c# filename="IRatingService.cs"
     Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default);
 
 ```
 te implementiramo sam servis na sljedeci nacin:
-```c# filename='RatingService.cs'
+```c# filename="RatingService.cs"
 public class RatingService : IRatingService
 {
     private readonly IRatingRepository _ratingRepository;
@@ -297,7 +297,7 @@ public class RatingService : IRatingService
 Postoji dosta diskusija o tome jel treba otvarati novi controller za nesto sto nije zaseban resurs i zapravo ovisi o preferencama. U ovom primjeru se drzimo sto minimalnijih controllera pa otvaramo zasebni controller.
 
 Implementacija controllera je straight-forward, dodamo skeleton i autoriziramo put metodu jer zelimo da samo regani useri mogu ocjeniti post:
-```c# filename='RatingsController.cs'
+```c# filename="RatingsController.cs"
 [ApiController]
 public class RatingsController : ControllerBase
 {
@@ -322,7 +322,7 @@ public class RatingsController : ControllerBase
 ```
 
 6. Dodamo i contract za request koji koristimo u RatingsControlleru
-```c# filename='RatePostRequest.cs'
+```c# filename="RatePostRequest.cs"
 public class RatePostRequest
 {
     public required int Rating { get; init; }
@@ -330,7 +330,7 @@ public class RatePostRequest
 ```
 
 7. Updateamo mapper za kraj:
-```c# filename='ContractMapping.cs'
+```c# filename="ContractMapping.cs"
     public static PostResponse MapToResponse(this Post post)
     {
         return new PostResponse
@@ -356,7 +356,7 @@ Implementacija bottom to top ovaj put:
 
 2. Implementiramo DeleteRatingAsync u Repo-U
 
-```c# filename='RatingRepository.cs'
+```c# filename="RatingRepository.cs"
     public async Task<bool> DeleteRatingAsync(Guid postId, Guid userId, CancellationToken token = default)
     {
         using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
@@ -375,7 +375,7 @@ Implementacija bottom to top ovaj put:
 
 4. Implementiramo RatingService metodu za DeleteRating
 
-```c# filename='RatingService.cs'
+```c# filename="RatingService.cs"
     public Task<bool> DeleteRatingAsync(Guid postId, Guid userId, CancellationToken token = default)
     {
         return _ratingRepository.DeleteRatingAsync(postId, userId, token);
@@ -384,7 +384,7 @@ Implementacija bottom to top ovaj put:
 
 5. Implementiramo u controlleru delete metodu i pozovemo servisnu metodu za delete
 
-```c# filename='RatingsController.cs'
+```c# filename="RatingsController.cs"
     [Authorize]
     [HttpDelete(ApiEndpoints.Posts.DeleteRating)]
     public async Task<IActionResult> DeleteRating([FromRoute] Guid id,
@@ -404,7 +404,7 @@ Isprobamo sada endpoint dva puta kroz postman i uvjerimo se da prvi put vrati 20
 Implementirat cemo funkcionalnost dohvata svih ocjena za trenutno logiranog usera i to cemo napraviti na nacin da izdvojimo zasebni contract i ne vracamo bloatane sve informacije o postu.
 Dodajemo daklje sljedece:
 1. `PostRatingResponse` sa sljedecim contentom:
-```c# filename='PostRatingResponse.cs'
+```c# filename="PostRatingResponse.cs"
 public class PostRatingResponse
 {
     public required Guid PostId { get; init; }
@@ -416,7 +416,7 @@ public class PostRatingResponse
 ```
 
 2. Dodajemo verziju domenskog modela za isti response:
-```c# filename='PostRating.cs'
+```c# filename="PostRating.cs"
 public class PostRating
 {
     public required Guid PostId { get; init; }
@@ -429,7 +429,7 @@ public class PostRating
 
 Sada idemo bottom -> up ponovno
 3. Dodamo potpis repo metode i implementaciju:
-```c# filename='RatingRepository.cs'
+```c# filename="RatingRepository.cs"
     public async Task<IEnumerable<PostRating>> GetRatingsForUserAsync(Guid userId, CancellationToken token = default)
     {
         using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
@@ -445,7 +445,7 @@ Sada idemo bottom -> up ponovno
 ```
 
 4. pa mirroramo to u RatingService
-```c# filename='RatingService.cs'
+```c# filename="RatingService.cs"
     public Task<IEnumerable<PostRating>> GetRatingsForUserAsync(Guid userId, CancellationToken token = default)
     {
         return _ratingRepository.GetRatingsForUserAsync(userId, token);
@@ -453,7 +453,7 @@ Sada idemo bottom -> up ponovno
 ```
 
 5. I za kraj dodamo implementaciju GET metode u controlleru za ratinge:
-```c# filename='RatingsController.cs'
+```c# filename="RatingsController.cs"
     [Authorize]
     [HttpGet(ApiEndpoints.Ratings.GetUserRatings)]
     public async Task<IActionResult> GetUserRatings(CancellationToken token = default)
