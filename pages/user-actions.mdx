@@ -1,0 +1,469 @@
+# Feature: Ocjenjivanje postova
+
+Zelimo implementirati funkcionalnost da korisnik moze ocjeniti post te da moze pregledati sve postove koje je ocjenio.
+
+## Gdje cemo dodati ocjene?
+
+Ocjene su direktno vezane uz post i zato cemo ih dodati u endpoint od postova.
+Tocnije, dodajemo u `ApiEndpoints` klasi `Movies` konstantu Rate
+
+```c#
+        public const string Rate = $"{Base}/{{id:guid}}/ratings";
+        public const string DeleteRating = $"{Base}/{{id:guid}}/ratings";
+```
+
+te dodajemo i zasebnu klasu za odvojen `ratings endpoint` sa sljedecom implementacijom:
+
+```c#
+    public static class Ratings
+    {
+        private const string Base = $"{ApiBase}/ratings";
+
+        public const string GetUserRatings = $"{Base}/me";
+    }
+```
+
+Sljedece sto moramo dodati je podrsku u contractima.
+Requesti ostaju isti, a responsovima dodajemo dva ratinga:
+- generalni rating posta
+- user specificni rating
+
+(Oba su nullable/opcionalni)
+
+Dodajemo dakle u `PostResponse.cs`
+```c#
+    public float? Rating { get; init; }
+
+    public int? UserRating { get; init; }
+```
+
+## Priprema baze podataka
+
+Kako bi spremili podatke o ocjenama napravit cemo tablicu Ratings dodavanjem sljedeceg komada koda u `DbInitializer.cs`
+
+```c#
+        await connection.ExecuteAsync(@"
+            create table if not exists ratings (
+                userid uuid,
+                movieid uuid references movies (id),
+                rating integer not null,
+                primary key (userid, movieid)
+            );
+        ");
+```
+
+Mozemo primjetiti da imamo kompozitni key (userid, movieid) za svaki zapis u tablici ratinga
+
+## Ispisivanje userovih ocjena
+
+Kako bi napravili query za ocjenama potreban nam je user id od trenutno authenticateanog usera.
+Postavlja se pitanje kako dohvatiti id od usera iz negovot jwt tokena.
+
+
+Trenutno imamo userid koji je claim, pa startna tocka za implementaciju zeljenog dohvata je sljedeca:
+1. dodajemo u `Api` projekt `Auth/` direktorij i u njega prebacimo `AuthConstants` klasu sa svim konstante bitne za autentikaciju:
+2. napravimo u istom direktoriju novu klasu `IdentityExtensions` sa kojom extendamo HttpContext na sljedeci nacin:
+```c# filename='IdentityExtensions.cs'
+public static class IdentityExtensions
+{
+    public static Guid? GetUserId(this HttpContext context)
+    {
+        var userId = context.User.Claims.SingleOrDefault(x => x.Type == "userid");
+
+        if (Guid.TryParse(userId?.Value, out var parsedId))
+        {
+            return parsedId;
+        }
+
+        return null;
+    }
+}
+```
+
+3. I sada cemo u PostsControlleru dohvatit i prosljedit userId na svim mjestima gdje ce nam trebati, odnosno:
+- Get 
+```c#
+var userId = HttpContext.GetUserId();
+
+
+var post = Guid.TryParse(idOrSlug, out var id)
+    ? await _postService.GetByIdAsync(id, userId, token)
+    : await _postService.GetBySlugAsync(idOrSlug, userId, token);
+```
+- Get All
+- Update
+
+4. Sada moramo promjeniti interfejsove za PostService i PostRepo na nacin da primaju kao argument userId
+```c# filename='IPostService.cs'
+    Task<Post?> GetByIdAsync(Guid id, Guid? userId = default, CancellationToken token = default);
+
+    Task<Post?> GetBySlugAsync(string slug, Guid? userId = default, CancellationToken token = default);
+
+    Task<IEnumerable<Post>> GetAllAsync(Guid? userId = default, CancellationToken token = default);
+
+    Task<Post?> UpdateAsync(Post post, Guid? userId = default, CancellationToken token = default);
+```
+
+5. Provucemo i kroz repo-e isto (osim za update)
+
+6. Dodamo u `Post` potrebne propertyje:
+```c#
+    public float? Rating { get; set; }
+    
+    public int? UserRating { get; set; }
+```
+
+7. Implementiramo zasebne queryje:
+- za by slug i by id dohvat (dodat i u parametar object `userId`):
+```sql
+    select p.*, round(avg(r.rating), 1) as rating, myr.rating as userrating
+    from posts p
+    left join ratings r on p.id = r.postid
+    left join ratings myr on p.id = myr.postid
+        and myr.userid = @userId
+    where id = @id
+    group by id, userrating
+```
+- za get all:
+```sql
+    select p.*,
+            string_agg(distinct c.name, ',') as categories,
+            round(avg(r.rating), 1) as rating,
+            myr.rating as userrating
+    from posts p 
+    left join categories c on p.id = c.postId
+    left join ratings r on p.id = r.postid
+    left join ratings myr on p.id = myr.postid
+        and myr.userid = @userId
+    group by id
+```
+
+8. Dodamo `IRatingRepository`:
+```c# filename='IRatingRepository.cs'
+public interface IRatingRepository
+{
+    Task<float?> GetRatingAsync(Guid postId, CancellationToken token = default);
+    Task<(float? Rating, int? UserRating)> GetRatingAsync(Guid postId, Guid userId, CancellationToken token = default);
+}
+```
+
+
+i `RatingRepository`:
+```c# filename='RatingRepository.cs'
+public class RatingRepository : IRatingRepository
+{
+    private readonly IDbConnectionFactory _dbConnectionFactory;
+
+    public RatingRepository(IDbConnectionFactory dbConnectionFactory)
+    {
+        _dbConnectionFactory = dbConnectionFactory;
+    }
+
+    public async Task<float?> GetRatingAsync(Guid postId, CancellationToken token = default)
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
+
+        return await connection.QuerySingleOrDefaultAsync<float?>(new CommandDefinition(@"
+            select round(avg(r.rating), 1) from ratings r
+            where postid = @postId
+        ", new { postId }, cancellationToken: token));
+    }
+
+    public async Task<(float? Rating, int? UserRating)> GetRatingAsync(Guid postId, Guid userId, CancellationToken token = default)
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
+
+        return await connection.QuerySingleOrDefaultAsync<(float?, int?)>(new CommandDefinition(@"
+            select round(avg(r.rating), 1),
+                   (select rating 
+                    from ratings 
+                    where movieid = @movieId 
+                      and userid = @userId 
+                    limit 1)
+            from ratings
+            where postid = @postId
+        ", new { postId, userId }, cancellationToken: token));
+    }
+}
+```
+
+9. Registriramo novi repo u DI container
+
+10. Izmjenimo PostServis update metodu na nacin da injectamo novi repo i koristimo ga u sljedecoj implementaciji:
+```c# filename='PostService.cs'
+...
+    public async Task<Post?> UpdateAsync(Post post, Guid? userId = default, CancellationToken token = default)
+    {
+        await _postValidator.ValidateAndThrowAsync(post, cancellationToken: token);
+        var postExists = await _postRepository.ExistsByIdAsync(post.Id, token);
+        if (!postExists)
+        {
+            return null;
+        }
+
+        await _postRepository.UpdateAsync(post, userId, token);
+
+        if (!userId.HasValue)
+        {
+            var rating = await _ratingRepository.GetRatingAsync(post.Id, token);
+            post.Rating = rating;
+
+            return post;
+        }
+
+        var (postRating, userRating) = await _ratingRepository.GetRatingAsync(post.Id, userId.Value, token);
+        post.Rating = postRating;
+        post.UserRating = userRating;
+        
+        return post;
+    }
+...
+```
+
+## Implementacija Rating funkcionalnosti
+
+Kako bi mogli dohvacati ocjene moramo imati implementiranu mogucnost davanja same ocjene na odreden post.
+Implementacija sljedece funkcionalnosti je odradena kroz sljedece korake:
+1. Dodajemo u potpis metode u interface od RatingRepoa
+```c#
+Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default);
+```
+
+2. Implementiramo istu metodu u repou:
+```c# filename='RatingRepository.cs'
+    public async Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default)
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
+
+        var result = await connection.ExecuteAsync(new CommandDefinition(@"
+            insert into ratings(userid, postid, rating)
+            values (@userId, @postId, @rating)
+            on conflict (userId, movieId) do update
+                set rating = @rating
+        "));
+
+        return result > 0;
+    }
+```
+^^ Mozemo primjetiti da gornji query ima flow *UPSERT*-a, odnosno update ako postoji a insert ako ne postoji entitet
+
+3. Umjesto da dodamo logiku ocjenjivanja u PostService odvojit cemo ga u `RatingService`, pa za to napravimo interfejs
+```c# filename='IRatingService.cs'
+    Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default);
+
+```
+te implementiramo sam servis na sljedeci nacin:
+```c# filename='RatingService.cs'
+public class RatingService : IRatingService
+{
+    private readonly IRatingRepository _ratingRepository;
+    private readonly IPostRepository _postRepository;
+
+    public RatingService(IRatingRepository ratingRepository, IPostRepository postRepository)
+    {
+        _ratingRepository = ratingRepository;
+        _postRepository = postRepository;
+    }
+
+    public async Task<bool> RatePostAsync(Guid postId, int rating, Guid userId, CancellationToken token = default)
+    {
+        if (rating is <= 0 or > 5)
+        {
+            throw new ValidationException(new[]
+            {
+                new ValidationFailure
+                {
+                    PropertyName = "Rating",
+                    ErrorMessage = "Rating must be between 1 and 5."
+                }
+            });
+        }
+
+        var postExists = await _postRepository.ExistsByIdAsync(postId, token);
+        if (!postExists)
+        {
+            return false;
+        }
+
+        return await _ratingRepository.RatePostAsync(postId, rating, userId, token);
+    }
+}
+```
+
+4. Registriramo i RatingService u DI container
+
+5. Napravimo novi controller `RatingsController` za otvaranje endpointa za ocjene 
+
+Postoji dosta diskusija o tome jel treba otvarati novi controller za nesto sto nije zaseban resurs i zapravo ovisi o preferencama. U ovom primjeru se drzimo sto minimalnijih controllera pa otvaramo zasebni controller.
+
+Implementacija controllera je straight-forward, dodamo skeleton i autoriziramo put metodu jer zelimo da samo regani useri mogu ocjeniti post:
+```c# filename='RatingsController.cs'
+[ApiController]
+public class RatingsController : ControllerBase
+{
+    private readonly IRatingService _ratingService;
+
+    public RatingsController(IRatingService ratingService)
+    {
+        _ratingService = ratingService;
+    }
+
+    [Authorize]
+    [HttpPut(ApiEndpoints.Posts.Rate)]
+    public async Task<IActionResult> RatePost([FromRoute] Guid id,
+        [FromBody] RatePostRequest request, CancellationToken token)
+    {
+        var userId = HttpContext.GetUserId();
+        var result = await _ratingService.RatePostAsync(id, request.Rating, userId!.Value, token);
+
+        return result ? Ok() : NotFound();
+    }
+}
+```
+
+6. Dodamo i contract za request koji koristimo u RatingsControlleru
+```c# filename='RatePostRequest.cs'
+public class RatePostRequest
+{
+    public required int Rating { get; init; }
+}
+```
+
+7. Updateamo mapper za kraj:
+```c# filename='ContractMapping.cs'
+    public static PostResponse MapToResponse(this Post post)
+    {
+        return new PostResponse
+        {
+            Id = post.Id,
+            Title = post.Title,
+            Slug = post.Slug,
+            Rating = post.Rating,
+            UserRating = post.UserRating,
+            Categories = post.Categories,
+            CreatedAt = post.CreatedAt
+        };
+    }
+
+```
+
+Isprobajmo sve kroz postman sa breakpointom u Controlleru da prodemo kroz flow.
+
+## Brisanje ocjene 
+
+Implementacija bottom to top ovaj put:
+1. Dodamo u interfejs RatingRepo-a
+
+2. Implementiramo DeleteRatingAsync u Repo-U
+
+```c# filename='RatingRepository.cs'
+    public async Task<bool> DeleteRatingAsync(Guid postId, Guid userId, CancellationToken token = default)
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
+
+        var result = await connection.ExecuteAsync(new CommandDefinition(@"
+            delete from ratings
+            where postid = @postId
+            and userid = @userId
+        ", new { userId, postId }, cancellationToken: token));
+
+        return result > 0;
+    }
+```
+
+3. Dodamo u interfejs RatingService-a
+
+4. Implementiramo RatingService metodu za DeleteRating
+
+```c# filename='RatingService.cs'
+    public Task<bool> DeleteRatingAsync(Guid postId, Guid userId, CancellationToken token = default)
+    {
+        return _ratingRepository.DeleteRatingAsync(postId, userId, token);
+    }
+```
+
+5. Implementiramo u controlleru delete metodu i pozovemo servisnu metodu za delete
+
+```c# filename='RatingsController.cs'
+    [Authorize]
+    [HttpDelete(ApiEndpoints.Posts.DeleteRating)]
+    public async Task<IActionResult> DeleteRating([FromRoute] Guid id,
+        CancellationToken token)
+    {
+        var userId = HttpContext.GetUserId();
+        var result = await _ratingService.DeleteRatingAsync(id, userId!.Value, token);
+
+        return result ? Ok() : NotFound();
+    }
+```
+
+Isprobamo sada endpoint dva puta kroz postman i uvjerimo se da prvi put vrati 200, a drugi put posto je obrisana prethodno ocjena 404 jer ne postoji vise.
+
+##Dohvat ratinga logiranog usera
+
+Implementirat cemo funkcionalnost dohvata svih ocjena za trenutno logiranog usera i to cemo napraviti na nacin da izdvojimo zasebni contract i ne vracamo bloatane sve informacije o postu.
+Dodajemo daklje sljedece:
+1. `PostRatingResponse` sa sljedecim contentom:
+```c# filename='PostRatingResponse.cs'
+public class PostRatingResponse
+{
+    public required Guid PostId { get; init; }
+    
+    public required string Slug { get; init; }
+
+    public required int Rating { get; init; }
+}
+```
+
+2. Dodajemo verziju domenskog modela za isti response:
+```c# filename='PostRating.cs'
+public class PostRating
+{
+    public required Guid PostId { get; init; }
+    
+    public required string Slug { get; init; }
+
+    public required int Rating { get; init; }
+}
+```
+
+Sada idemo bottom -> up ponovno
+3. Dodamo potpis repo metode i implementaciju:
+```c# filename='RatingRepository.cs'
+    public async Task<IEnumerable<PostRating>> GetRatingsForUserAsync(Guid userId, CancellationToken token = default)
+    {
+        using var connection = await _dbConnectionFactory.CreateConnectionAsync(token);
+
+        return await connection.QueryAsync<PostRating>(new CommandDefinition(@"
+            select r.rating, r.postid, p.slug
+            from ratings r
+            inner join posts p on r.postid = p.id
+            where userid = @userId
+        ", new { userId }, cancellationToken: token));
+    }
+}
+```
+
+4. pa mirroramo to u RatingService
+```c# filename='RatingService.cs'
+    public Task<IEnumerable<PostRating>> GetRatingsForUserAsync(Guid userId, CancellationToken token = default)
+    {
+        return _ratingRepository.GetRatingsForUserAsync(userId, token);
+    }
+```
+
+5. I za kraj dodamo implementaciju GET metode u controlleru za ratinge:
+```c# filename='RatingsController.cs'
+    [Authorize]
+    [HttpGet(ApiEndpoints.Ratings.GetUserRatings)]
+    public async Task<IActionResult> GetUserRatings(CancellationToken token = default)
+    {
+        var userId = HttpContext.GetUserId();
+        var ratings = await _ratingService.GetRatingsForUserAsync(userId!.Value, token);
+        var ratingResponse = ratings.MapToResponse();
+
+        return Ok(ratingResponse);
+    }
+```
+
+Isprobamo puni flow jos jednom u Postmanu.
